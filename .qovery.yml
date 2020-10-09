@@ -1,15 +1,15 @@
 application:
-  name: coffeebot-10-app
-  project: coffeebot-10-project
+  name: coffeebot-app
+  project: coffeebot-project
   cloud_region: aws/ap-southeast-2
   publicly_accessible: true
 databases:
 - type: postgresql
   version: "11.5"
-  name: coffee-db-10-db
+  name: coffee-db
 routers:
 - name: main
   routes:
-  - application_name: coffeebot-10-app
+  - application_name: coffeebot-app
     paths:
     - /
