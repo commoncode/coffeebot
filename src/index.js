@@ -84,6 +84,8 @@ CREATE TABLE IF NOT EXISTS public.coffee
     PRIMARY KEY (id)
 );
 `
+
+GET_DRINK_QUERY = 'SELECT user_id, user_name, created_at FROM coffee WHERE user_id = $1 AND user_name = $2 AND created_at = $3'
 ADD_DRINK_QUERY = 'INSERT INTO coffee (user_id, user_name, created_at) VALUES($1, $2, $3)'
 COUNT_ALL_DRINKS_QUERY = 'SELECT COUNT(*) FROM coffee WHERE created_at > $1 AND created_at < $2'
 COUNT_USER_DRINKS_QUERY = 'SELECT COUNT(*) FROM coffee WHERE user_id = $1 AND created_at > $2 AND created_at < $3'
@@ -151,7 +153,7 @@ async function createBackup() {
         }
 
     } finally {
-        client.release()
+        await client.release()
     }
 }
 
@@ -164,7 +166,7 @@ async function createDatabaseBitsIfMissing() {
         await client.query(CREATE_BACKUP_TABLE_QUERY);
         console.log("All table creation complete");
     } finally {
-        client.release()
+        await client.release()
     }
 
 }
@@ -218,7 +220,7 @@ async function showCoffeeCount(numOfItems) {
             "blocks": blocks
         };
     } finally {
-        client.release()
+        await client.release()
     }
 }
 
@@ -263,13 +265,52 @@ async function addCoffee(userId, userName, inc) {
             "text": `That's coffee number ${userCoffeeCount} for you today, and number ${totalCoffeeCount} for CC today`
         }
     } finally {
-        client.release()
+        await client.release()
     }
 }
 
+PERMISSION_IMPORT = "IMPORT"
+PERMISSION_SLACKACTION = "SLACK_ACTION"
+
+async function hasPermission(ctx, action) {
+    return ctx.request.query.key === AUTH_KEY
+}
+
+router.post('/importFromFirebaseData', async (ctx, next) => {
+    if (!hasPermission(ctx, PERMISSION_IMPORT)) {
+        ctx.body = { result: "nope" };
+        return
+    }
+
+    if (ctx.request.body) {
+        let added = 0;
+        let existing = 0;
+        const client = await pool.connect()
+        try {
+            ctx.request.body.forEach(async (dayData) => {
+                if (!dayData.timestamp) {
+                    return;
+                }
+                dayData.coffeeTimes.forEach(async (row) => {
+                    const checkIfExistsQuery = await client.query(GET_DRINK_QUERY, [row.user_id, row.user_name, row.timestamp])
+                    if (checkIfExistsQuery.rows.length === 0) {
+                        added++;
+                        await client.query(ADD_DRINK_QUERY, [row.user_id, row.user_name, row.timestamp])
+                    } else {
+                        existing++;
+                    }
+                })
+            })
+            ctx.body = { added: added, existing: existing };
+        } finally {
+            await client.release()
+        }
+    }
+
+})
+
 router.post('/addCoffee', async (ctx, next) => {
-    if (ctx.request.query.key !== AUTH_KEY) {
-        console.log(ctx.request.query.key)
+    if (!hasPermission(ctx, PERMISSION_IMPORT)) {
         ctx.body = { result: "nope" };
         return
     }
