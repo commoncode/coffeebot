@@ -359,10 +359,10 @@ router.post("/addCoffee", async (ctx, next) => {
   }
 
   if (ctx.request.body.command !== "/coffee") {
-    ctx.body({
+    ctx.body = {
       response_type: "ephemeral",
       text: "Something has gone horribly wrong",
-    });
+    };
     return;
   }
 
