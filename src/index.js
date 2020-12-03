@@ -97,6 +97,7 @@ TALLY_ALL_DRINKS_QUERY =
 DELETE_N_MOST_RECENT_DRINKS_FOR_USER_QUERY =
   "DELETE FROM coffee WHERE id IN (SELECT id FROM coffee WHERE user_id = $1 AND created_at > $2 AND created_at < $3 ORDER BY id DESC LIMIT $4)";
 ALL_DRINKS_SINCE_DATETIME_QUERY = "SELECT id, user_id, user_name, created_at FROM coffee WHERE created_at > $1";
+ALL_DRINKS_QUERY = "SELECT id, user_id, user_name, created_at FROM coffee";
 
 async function createBackup() {
   const client = await pool.connect();
@@ -149,7 +150,7 @@ async function createBackup() {
 
     const params = {
       Bucket: AWS_BUCKET_NAME,
-      Key: `${AWS_BACKUP_FOLDER}/${maxDate.toISO()}.rows.json`,
+      Key: `${AWS_BACKUP_FOLDER}/${maxDate.toISO()}.rows.incremental.json`,
       Body: rowsToBackUp.join("\n"),
     };
 
@@ -162,6 +163,56 @@ async function createBackup() {
       };
     } catch (err) {
       await client.query(CREATE_BACKUP_ROW_QUERY, [dt.toISO(), maxDate.toISO(), false, err]);
+      return { response_type: "ephemeral", text: `Backup error: ${err}` };
+    }
+  } finally {
+    await client.release();
+  }
+}
+
+async function createFullBackup() {
+  const client = await pool.connect();
+
+  try {
+    const dt = DateTime.local().setZone("Australia/Melbourne");
+    const getAllDrinksQuery = await client.query(ALL_DRINKS_QUERY);
+    allDrinks = getAllDrinksQuery.rows;
+
+    if (allDrinks.length === 0) {
+      return {
+        response_type: "ephemeral",
+        text: "No entries, ever, to back up - which seems weird and wrong"
+      };
+    }
+
+    rowsToBackUp = allDrinks.map(data =>
+      JSON.stringify({
+        id: data.id,
+        user_id: data.user_id,
+        user_name: data.user_name,
+        created_at: data.created_at,
+      })
+    )
+
+    const s3 = new AWS.S3({
+      accessKeyId: AWS_ACCESS_KEY_ID,
+      secretAccessKey: AWS_SECRET_KEY,
+      region: AWS_REGION,
+    });
+
+    const params = {
+      Bucket: AWS_BUCKET_NAME,
+      Key: `${AWS_BACKUP_FOLDER}/${dt.toISO()}.rows.full.json`,
+      Body: rowsToBackUp.join("\n"),
+    };
+
+    try {
+      await s3.upload(params).promise();
+      return {
+        response_type: "ephemeral",
+        text: `${allDrinks.length} entries backed up. Filename: ${params.Key}.`,
+      };
+    } catch (err) {
       return { response_type: "ephemeral", text: `Backup error: ${err}` };
     }
   } finally {
@@ -390,6 +441,9 @@ router.post("/addCoffee", async (ctx, next) => {
     return;
   } else if (ctx.request.body.text === "backup") {
     ctx.body = await createBackup();
+    return;
+  } else if (ctx.request.body.text === "backup-all") {
+    ctx.body = await createFullBackup();
     return;
   } else {
     ctx.body = {
