@@ -54,7 +54,8 @@ function showHelp() {
         - \`/coffee stomach-pump\` - subtract a single coffee
         - \`/coffee -<number>\` - subtract multiple coffees, max 2; but try not to add coffees you're not drinking
         - \`/coffee count\` - show the total number of coffees, and highest 5 coffee consumers
-        - \`/coffee count-all\` - show the total number of coffees, and _all_ coffee consumers`,
+        - \`/coffee count-all\` - show the total number of coffees, and _all_ coffee consumers
+        - \`/coffee stats\` - see summary data from all coffees recorded since the beginning of the bot`,
   };
 }
 
@@ -92,6 +93,16 @@ GET_DRINK_QUERY =
 ADD_DRINK_QUERY = "INSERT INTO coffee (user_id, user_name, created_at) VALUES($1, $2, $3)";
 COUNT_ALL_DRINKS_QUERY = "SELECT COUNT(*) FROM coffee WHERE created_at > $1 AND created_at < $2";
 COUNT_USER_DRINKS_QUERY = "SELECT COUNT(*) FROM coffee WHERE user_id = $1 AND created_at > $2 AND created_at < $3";
+COUNT_ALL_DRINKS_EVER_QUERY = "SELECT COUNT(*) FROM coffee"
+AVERAGE_USER_DRINKS_EVER_QUERY = `
+SELECT user_name, SUM(coffees_on_day) AS total_coffees, AVG(coffees_on_day) AS avg_coffees_per_day
+FROM (
+  SELECT user_name, COUNT(*) AS coffees_on_day
+  FROM coffee
+  GROUP BY user_name, date(created_at AT TIME ZONE 'Australia/Melbourne')
+) AS coffees_per_day
+GROUP BY user_name
+ORDER BY avg_coffees_per_day DESC`;
 TALLY_ALL_DRINKS_QUERY =
   "SELECT user_name, COUNT(*) AS drink_count FROM coffee WHERE created_at > $1 AND created_at < $2 GROUP BY user_name ORDER BY drink_count DESC";
 DELETE_N_MOST_RECENT_DRINKS_FOR_USER_QUERY =
@@ -228,6 +239,51 @@ async function createDatabaseBitsIfMissing() {
     console.log("Attempting to create backup table");
     await client.query(CREATE_BACKUP_TABLE_QUERY);
     console.log("All table creation complete");
+  } finally {
+    await client.release();
+  }
+}
+
+async function showCoffeeStats() {
+  const client = await pool.connect();
+  try {
+
+    const totalCoffeeCountQuery = await client.query(COUNT_ALL_DRINKS_EVER_QUERY);
+    const totalCoffeeCount = totalCoffeeCountQuery.rows[0].count;
+
+    const coffeeCountByUserQuery = await client.query(AVERAGE_USER_DRINKS_EVER_QUERY);
+
+    let blocks = [];
+    let textChunks = [];
+
+    coffeeCountByUserQuery.rows.forEach(row =>
+      textChunks.push(
+        `- _${row.user_name}_ has consumed an average of ${Math.round(row.avg_coffees_per_day)} coffees per reporting day, for a total of ${row.total_coffees} coffees`
+      )
+    )
+
+    if (textChunks.length > 0) {
+      blocks.push({
+        type: "section",
+        text: {
+          type: "mrkdwn",
+          text: textChunks.join("\n"),
+        },
+      });
+    }
+
+    blocks.unshift({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*Since CoffeeBot began it's glorious existence*, Common Coders have consumed ${totalCoffeeCount} coffees`,
+      },
+    });
+
+    return {
+      response_type: "in_channel",
+      blocks: blocks,
+    };
   } finally {
     await client.release();
   }
@@ -425,6 +481,9 @@ router.post("/addCoffee", async (ctx, next) => {
     return;
   } else if (ctx.request.body.text === "count-all") {
     ctx.body = await showCoffeeCount(null);
+    return;
+  } else if (ctx.request.body.text === "stats") {
+    ctx.body = await showCoffeeStats(null);
     return;
   } else if (ctx.request.body.text === "stomach-pump") {
     ctx.body = await addCoffee(ctx.request.body.user_id, ctx.request.body.user_name, -1);
