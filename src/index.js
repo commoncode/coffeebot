@@ -258,7 +258,7 @@ async function showCoffeeStats() {
 
     coffeeCountByUserQuery.rows.forEach(row =>
       textChunks.push(
-        `- _${row.user_name}_ has consumed an average of ${Number.parseFloat(row.avg_coffees_per_day).toFixed(1)} coffees per day across ${row.reporting_days} reporting days, for a total of ${row.total_coffees} coffees`
+        `- _${row.user_name}_ has averaged ${Number.parseFloat(row.avg_coffees_per_day).toFixed(1)} coffees per day across ${row.reporting_days} days, for a total of ${row.total_coffees} coffees`
       )
     )
 
