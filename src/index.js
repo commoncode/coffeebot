@@ -95,7 +95,7 @@ COUNT_ALL_DRINKS_QUERY = "SELECT COUNT(*) FROM coffee WHERE created_at > $1 AND 
 COUNT_USER_DRINKS_QUERY = "SELECT COUNT(*) FROM coffee WHERE user_id = $1 AND created_at > $2 AND created_at < $3";
 COUNT_ALL_DRINKS_EVER_QUERY = "SELECT COUNT(*) FROM coffee"
 AVERAGE_USER_DRINKS_EVER_QUERY = `
-SELECT user_name, SUM(coffees_on_day) AS total_coffees, AVG(coffees_on_day) AS avg_coffees_per_day, STDDEV(coffees_on_day) AS stddev_coffees_per_day
+SELECT user_name, COUNT(coffees_on_day) AS reporting_days, SUM(coffees_on_day) AS total_coffees, AVG(coffees_on_day) AS avg_coffees_per_day, STDDEV(coffees_on_day) AS stddev_coffees_per_day
 FROM (
   SELECT user_name, COUNT(*) AS coffees_on_day
   FROM coffee
@@ -258,7 +258,7 @@ async function showCoffeeStats() {
 
     coffeeCountByUserQuery.rows.forEach(row =>
       textChunks.push(
-        `- _${row.user_name}_ has consumed an average of ${row.avg_coffees_per_day.toFixed(1)} coffees per reporting day (stddev ${row.stddev_coffees_per_day}), for a total of ${row.total_coffees} coffees`
+        `- _${row.user_name}_ has consumed an average of ${Number.parseFloat(row.avg_coffees_per_day).toFixed(1)} coffees per day across ${row.reporting_days} reporting days, for a total of ${row.total_coffees} coffees`
       )
     )
 
