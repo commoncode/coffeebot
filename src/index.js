@@ -55,9 +55,21 @@ function showHelp() {
         - \`/coffee -<number>\` - subtract multiple coffees, max 2; but try not to add coffees you're not drinking
         - \`/coffee count\` - show the total number of coffees, and highest 5 coffee consumers
         - \`/coffee count-all\` - show the total number of coffees, and _all_ coffee consumers
-        - \`/coffee stats\` - see summary data from all coffees recorded since the beginning of the bot`,
+        - \`/coffee stats\` - see summary data from all coffees recorded since the beginning of the bot
+        - \`/coffee about\` - about coffeebot`,
   };
 }
+
+function showAbout() {
+  return {
+    response_type: "ephemeral",
+    text: `Coffeebot was written the night before international coffee 2020 as a combination between a joke and
+an experiment in using firebase. Somehow, it has continued to be used since then. I hope you like it.
+
+   - Simeon`
+  }
+}
+
 
 // CREATE_DATABASE_QUERY = "CREATE DATABASE drinks ENCODING = 'UTF8'";
 // CHECK_IF_DATABASE_EXISTS_QUERY = "SELECT datname FROM pg_catalog.pg_database WHERE datname = drinks;"
@@ -475,6 +487,9 @@ router.post("/addCoffee", async (ctx, next) => {
 
   if (ctx.request.body.text === "help") {
     ctx.body = showHelp();
+    return;
+  } else if (ctx.request.body.text === "about") {
+    ctx.body = showAbout();
     return;
   } else if (ctx.request.body.text === "count") {
     ctx.body = await showCoffeeCount(COUNT_DISPLAY_SIZE);
