@@ -24,16 +24,16 @@ app.use(bodyParser());
 const router = new Router();
 
 const pool = new Pool({
-  user: process.env.QOVERY_DATABASE_COFFEE_DB_USERNAME,
-  host: process.env.QOVERY_DATABASE_COFFEE_DB_HOST,
-  database: process.env.DATABASE_NAME,
-  password: process.env.QOVERY_DATABASE_COFFEE_DB_PASSWORD,
-  port: process.env.QOVERY_DATABASE_COFFEE_DB_PORT,
+  user: process.env.POSTGRES_USER,
+  host: process.env.POSTGRES_HOST,
+  database: process.env.POSTGRES_DB,
+  password: process.env.POSTGRES_PASSWORD,
+  port: process.env.POSTGRES_PORT,
 });
 
 new CronJob(
   "00 00 02 * * *",
-  async function () {
+  async function() {
     await createBackup();
   },
   null,
@@ -521,11 +521,11 @@ app.listen(3000, async () => {
   console.log("running on port 3000");
 
   console.log({
-    user: process.env.QOVERY_DATABASE_COFFEE_DB_USERNAME,
-    host: process.env.QOVERY_DATABASE_COFFEE_DB_HOST,
-    database: process.env.QOVERY_DATABASE_COFFEE_DB_DATABASE,
-    password: process.env.QOVERY_DATABASE_COFFEE_DB_PASSWORD,
-    port: process.env.QOVERY_DATABASE_COFFEE_DB_PORT,
+    user: process.env.POSTGRES_USER,
+    host: process.env.POSTGRES_HOST,
+    database: process.env.POSTGRES_DB,
+    password: process.env.POSTGRES_PASSWORD,
+    port: process.env.POSTGRES_PORT,
     key: process.env.AUTH_KEY,
   });
 });
