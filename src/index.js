@@ -1,27 +1,45 @@
 require("dotenv").config();
-require("./queries");
+
 const AUTH_KEY = process.env.AUTH_KEY;
-const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID;
-const AWS_SECRET_KEY = process.env.AWS_SECRET_KEY;
-const AWS_BUCKET_NAME = process.env.AWS_BUCKET_NAME;
-const AWS_BACKUP_FOLDER = process.env.AWS_BACKUP_FOLDER;
-const AWS_REGION = process.env.AWS_REGION;
+const ADMIN_KEY = process.env.ADMIN_KEY;
+
+const awsDetails = {
+  AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+  AWS_SECRET_KEY: process.env.AWS_SECRET_KEY,
+  AWS_BUCKET_NAME: process.env.AWS_BUCKET_NAME,
+  AWS_BACKUP_FOLDER: process.env.AWS_BACKUP_FOLDER,
+  AWS_REGION: process.env.AWS_REGION,
+}
+
+const REQUEST_PASSTHROUGH_HOST = process.env.REQUEST_PASSTHROUGH_HOST;
+const REQUEST_PASSTHROUGH_PORT = process.env.REQUEST_PASSTHROUGH_PORT;
+
+const GENERIC_FAILURE_RESPONSE = {
+  response_type: "ephemeral",
+  text: "I'm afraid I don't understand your command. Take another sip and try again.",
+};
 
 const MAX_COFFEE_ADD = 5;
 const MAX_COFFEE_SUBTRACT = 2;
 const COUNT_DISPLAY_SIZE = 5;
 
-TARGET_MIGRATION_LEVEL = 1;
+TARGET_MIGRATION_LEVEL = 2;
 
 const Koa = require("koa");
 const Router = require("koa-router");
 const bodyParser = require("koa-bodyparser");
 const { DateTime } = require("luxon");
 const { Pool } = require("pg");
-const AWS = require("aws-sdk");
-const queries = require("./queries");
 const CronJob = require("cron").CronJob;
 
+// http is used to forward through the incoming requests
+// to the old coffeebot version in case rollback is needed
+const http = require('http');
+
+const queries = require("./queries");
+const migration = require("./migration");
+const backup = require("./backup");
+const wordlist = require("./wordlist");
 const app = new Koa();
 app.use(bodyParser());
 
@@ -38,17 +56,54 @@ const pool = new Pool({
 new CronJob(
   "00 00 02 * * *",
   async function () {
-    await createBackup();
+    await createBackup(pool, awsDetails);
   },
   null,
   true,
   "Australia/Melbourne"
 );
 
+function passthroughRequest(ctx) {
+  /**
+   * Passes through/repeats the incoming request on to another
+   * host; basically just so the old coffeebot can continue
+   * to process incoming data in case the new one screws up
+   * or isn't working correctly.
+   */
+  if (REQUEST_PASSTHROUGH_HOST === null) {
+    return;
+  }
+
+  const data = JSON.stringify({ ...ctx.request.body });
+  setTimeout(() => {
+    try {
+      const options = {
+        protocol: 'http:',
+        hostname: REQUEST_PASSTHROUGH_HOST,
+        port: REQUEST_PASSTHROUGH_PORT,
+        path: ctx.path,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': data.length
+        }
+      }
+      const request = http.request(options);
+      request.on('error', function (err) {
+        console.log(`Failed to replace request: inner error ${err}`);
+      });
+      request.write(data);
+      request.end();
+    } catch (e) {
+      console.log(`Failed to replay request: ${e}`);
+    }
+  });
+}
+
 function showHelp() {
   return {
     response_type: "ephemeral",
-    text: `Ohai, and welcome to coffeebot. Coffeebot counts the coffees consumed by Common Coders because why not.
+    text: `Ohai, and welcome to coffeebot. Coffeebot counts the coffees consumed by teams because why not.
 
         The most important commands are:
 
@@ -74,246 +129,33 @@ an experiment in using firebase. Somehow, it has continued to be used since then
   }
 }
 
-async function runMigrations(userId, userName, teamId, teamDomain) {
-  /***
-   * Run migrations on the database if required. This can be run by any user (which is a bit
-   * dubious, but the command also isn't listed anywhere and should be idempotent so 🤷 gotta
-   * start somewhere)
-   * 
-   * @param {string} userId - the slack user_id issuing the migrate command
-   * @param {string} userName - the slack user name issuing the migrate command
-   * @param {string} teamId - the workspace team_id from which the migrate command is being issued
-   * @param {string} teamDomain - the workspace team_domain from which the migrate command is being issued
-   */
 
-  const client = await pool.connect();
-
-  try {
-    await client.query(queries.BEGIN);
-    const dt = DateTime.local().setZone("Australia/Melbourne");
-    const getCurrentMigrationLevelQuery = await client.query(queries.GET_MIGRATION_LEVEL);
-
-    // If there are no migration rows, the max value is null
-    let currentMigrationLevel = getCurrentMigrationLevelQuery.rows[0].migration_level;
-    console.log(`Current migration level: ${currentMigrationLevel}`);
-
-    if (currentMigrationLevel === null) {
-      console.log(`Applying migration level 1`);
-      await client.query(queries.CREATE_ABSTRACT_USER_TABLE_V1_QUERY);
-      await client.query(queries.CREATE_TEAM_TABLE_V1_QUERY);
-      await client.query(queries.CREATE_TEAM_USER_TABLE_V1_QUERY);
-      await client.query(queries.CREATE_ABSTRACT_USER_DRINK_TABLE_V1_QUERY);
-
-      // Now to migrate the data.
-      // There is an assumption here that all the current data comes from
-      // the workspace from which the migration is being run.
-      // If that isn't the case... well, just make sure it is the case OK?
-      // This could no doubt be implemented directly in SQL, but that's a
-      // future thing to think about
-
-      // Create the team record
-      insertTeamQuery = await client.query(queries.INSERT_OR_GET_TEAM_V1_QUERY, [dt.toISO(), teamId, teamDomain]);
-      dbTeamId = insertTeamQuery.rows[0].id
-
-      // Get a list of distinct users from the drinks table
-      getDistinctUsersQuery = await client.query(queries.MIGRATION_V1_GET_DISTINCT_USERS_QUERY);
-
-      for (row of getDistinctUsersQuery.rows) {
-        // Create an abstract user and get back the identifier
-        const insertAbstractUserQuery = await client.query(queries.INSERT_ABSTRACT_USER_V1_QUERY, [dt.toISO()]);
-        const dbAbstractUserId = insertAbstractUserQuery.rows[0].id
-
-        // Create a user record for each distinct user from the drinks table
-        // on the current team_id pointing to the abstract user and team record
-        await client.query(queries.INSERT_USER_V1_QUERY, [dt.toISO(), row.user_id, row.user_name, dbTeamId, dbAbstractUserId])
-      }
-
-      // Once that has been done for all users, run a single SQL command
-      // to migrate all the drinks that have been recorded
-      await client.query(queries.MIGRATION_V1_COPY_DRINKS)
-      // Step 3 ... Profit?
-      await client.query(queries.MIGRATION_V1_SET_MIGRATION_LEVEL, [1, dt.toISO()]);
-      await client.query(queries.COMMIT);
-      console.log(`Migration level 1 applied successfully`);
-    }
-    // Add additional migrations here
-    console.log(`All necessary migrations applied successfully`);
-    return {
-      response_type: "ephemeral",
-      text: `Migrations ran successfully`,
-    };
-  } catch (e) {
-    await client.query(queries.ROLLBACK);
-    console.log(`Migrations failed to apply: ${e}`);
-    return {
-      response_type: "ephemeral",
-      text: `Migrations failed to apply`,
-    };
-  } finally {
-    await client.release();
-  }
-}
-
-async function areMigrationsPending() {
-  /**
-   * Check if any migrations are pending, and return an error if so
-   */
-  const client = await pool.connect();
-  try {
-    const getCurrentMigrationLevelQuery = await client.query(queries.GET_MIGRATION_LEVEL);
-
-    // If there are no migration rows, the max value is null
-    const currentMigrationLevel = getCurrentMigrationLevelQuery.rows[0].migration_level;
-    return currentMigrationLevel === null || currentMigrationLevel < TARGET_MIGRATION_LEVEL;
-  } finally {
-    await client.release();
-  }
-}
-
-async function createBackup() {
-  const client = await pool.connect();
-
-  try {
-    const dt = DateTime.local().setZone("Australia/Melbourne");
-    const getLastSuccessfulBackupQuery = await client.query(queries.GET_LAST_SUCCESSFUL_BACKUP_DATETIME_QUERY);
-
-    let backupFromDate = DateTime.fromSeconds(0);
-    if (getLastSuccessfulBackupQuery.rows.length > 0) {
-      backupFromDate = DateTime.fromJSDate(getLastSuccessfulBackupQuery.rows[0].backup_until);
-    }
-
-    const getAllDrinksSinceDatetimeQuery = await client.query(queries.ALL_DRINKS_SINCE_DATETIME_QUERY, [
-      backupFromDate.toISO(),
-    ]);
-    allDrinksSinceDatetime = getAllDrinksSinceDatetimeQuery.rows;
-
-    if (allDrinksSinceDatetime.length === 0) {
-      return {
-        response_type: "ephemeral",
-        text: `No entries since ${backupFromDate.toISO()} to back up.`,
-      };
-    }
-
-    const rowsToBackUp = Array();
-    let maxDate = DateTime.fromSeconds(0);
-
-    for (let idx = 0, len = allDrinksSinceDatetime.length; idx < len; idx++) {
-      rowsToBackUp.push(
-        JSON.stringify({
-          id: allDrinksSinceDatetime[idx].id,
-          user_id: allDrinksSinceDatetime[idx].user_id,
-          user_name: allDrinksSinceDatetime[idx].user_name,
-          created_at: allDrinksSinceDatetime[idx].created_at,
-        })
-      );
-      let thisDate = DateTime.fromJSDate(allDrinksSinceDatetime[idx].created_at);
-      console.log(thisDate);
-      if (thisDate > maxDate) {
-        maxDate = thisDate;
-      }
-    }
-
-    const s3 = new AWS.S3({
-      accessKeyId: AWS_ACCESS_KEY_ID,
-      secretAccessKey: AWS_SECRET_KEY,
-      region: AWS_REGION,
-    });
-
-    const params = {
-      Bucket: AWS_BUCKET_NAME,
-      Key: `${AWS_BACKUP_FOLDER}/${maxDate.toISO()}.rows.incremental.json`,
-      Body: rowsToBackUp.join("\n"),
-    };
-
-    try {
-      await s3.upload(params).promise();
-      await client.query(queries.CREATE_BACKUP_ROW_QUERY, [dt.toISO(), maxDate.toISO(), true, ""]);
-      return {
-        response_type: "ephemeral",
-        text: `${allDrinksSinceDatetime.length} entries backed up. Filename: ${params.Key}.`,
-      };
-    } catch (err) {
-      await client.query(queries.CREATE_BACKUP_ROW_QUERY, [dt.toISO(), maxDate.toISO(), false, err]);
-      return { response_type: "ephemeral", text: `Backup error: ${err}` };
-    }
-  } finally {
-    await client.release();
-  }
-}
-
-async function createFullBackup() {
-  const client = await pool.connect();
-
-  try {
-    const dt = DateTime.local().setZone("Australia/Melbourne");
-    const getAllDrinksQuery = await client.query(queries.ALL_DRINKS_QUERY);
-    allDrinks = getAllDrinksQuery.rows;
-
-    if (allDrinks.length === 0) {
-      return {
-        response_type: "ephemeral",
-        text: "No entries, ever, to back up - which seems weird and wrong"
-      };
-    }
-
-    rowsToBackUp = allDrinks.map(data =>
-      JSON.stringify({
-        id: data.id,
-        user_id: data.user_id,
-        user_name: data.user_name,
-        created_at: data.created_at,
-      })
-    )
-
-    const s3 = new AWS.S3({
-      accessKeyId: AWS_ACCESS_KEY_ID,
-      secretAccessKey: AWS_SECRET_KEY,
-      region: AWS_REGION,
-    });
-
-    const params = {
-      Bucket: AWS_BUCKET_NAME,
-      Key: `${AWS_BACKUP_FOLDER}/${dt.toISO()}.rows.full.json`,
-      Body: rowsToBackUp.join("\n"),
-    };
-
-    try {
-      await s3.upload(params).promise();
-      return {
-        response_type: "ephemeral",
-        text: `${allDrinks.length} entries backed up. Filename: ${params.Key}.`,
-      };
-    } catch (err) {
-      return { response_type: "ephemeral", text: `Backup error: ${err}` };
-    }
-  } finally {
-    await client.release();
-  }
-}
 
 async function createDatabaseBitsIfMissing() {
   const client = await pool.connect();
   try {
-    console.log("Attempting to create drink table");
-    await client.query(queries.CREATE_DRINK_TABLE_QUERY);
-    console.log("Attempting to create backup table");
-    await client.query(queries.CREATE_BACKUP_TABLE_QUERY);
     console.log("Attempting to create migrations table");
-    await client.query(queries.CREATE_MIGRATION_TABLE_QUERY);
+    await client.query(queries.CREATE_MIGRATION_TABLE_VX_QUERY);
     console.log("All table creation complete");
   } finally {
     await client.release();
   }
 }
 
-async function showCoffeeStats() {
+async function showCoffeeStats(dbTeamId, dbTeamLabel) {
   const client = await pool.connect();
   try {
 
-    const totalCoffeeCountQuery = await client.query(queries.COUNT_ALL_DRINKS_EVER_QUERY);
+    const totalCoffeeCountQuery = await client.query(
+      queries.COUNT_ALL_DRINKS_EVER_V2_QUERY,
+      [dbTeamId,]
+    );
     const totalCoffeeCount = totalCoffeeCountQuery.rows[0].count;
 
-    const coffeeCountByUserQuery = await client.query(queries.AVERAGE_USER_DRINKS_EVER_QUERY);
+    const coffeeCountByUserQuery = await client.query(
+      queries.AVERAGE_USER_DRINKS_EVER_V2_QUERY,
+      [dbTeamId,]
+    );
 
     let blocks = [];
     let textChunks = [];
@@ -338,7 +180,7 @@ async function showCoffeeStats() {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*Since CoffeeBot began it's glorious existence*, Common Coders have consumed ${totalCoffeeCount} coffees`,
+        text: `*Since CoffeeBot began it's glorious existence*, ${getTeamLabelOrGenericPlural(dbTeamLabel)} have consumed ${totalCoffeeCount} coffees`,
       },
     });
 
@@ -351,7 +193,11 @@ async function showCoffeeStats() {
   }
 }
 
-async function showCoffeeCount(numOfItems) {
+function getTeamLabelOrGenericPlural(dbTeamLabel) {
+  return dbTeamLabel || 'workspace members';
+}
+
+async function showCoffeeCount(dbTeamId, dbTeamLabel, numOfItems) {
   const client = await pool.connect();
   try {
     const dt = DateTime.local().setZone("Australia/Melbourne");
@@ -363,15 +209,17 @@ async function showCoffeeCount(numOfItems) {
     });
     const start_of_tomorrow = dt.plus({ days: 1 }).set({ hour: 0, minute: 0, second: 0, millisecond: 0 });
 
-    const totalCoffeeCountQuery = await client.query(queries.COUNT_ALL_DRINKS_QUERY, [
+    const totalCoffeeCountQuery = await client.query(queries.COUNT_ALL_DRINKS_V2_QUERY, [
       start_of_today.toISO(),
       start_of_tomorrow.toISO(),
+      dbTeamId,
     ]);
     const totalCoffeeCount = totalCoffeeCountQuery.rows[0].count;
 
-    const coffeeCountByUserQuery = await client.query(queries.TALLY_ALL_DRINKS_QUERY, [
+    const coffeeCountByUserQuery = await client.query(queries.TALLY_ALL_DRINKS_V2_QUERY, [
       start_of_today.toISO(),
       start_of_tomorrow.toISO(),
+      dbTeamId,
     ]);
 
     let blocks = [];
@@ -401,7 +249,7 @@ async function showCoffeeCount(numOfItems) {
       type: "section",
       text: {
         type: "mrkdwn",
-        text: `*Today*, Common Coders have consumed ${totalCoffeeCount} coffees`,
+        text: `*Today*, ${getTeamLabelOrGenericPlural(dbTeamLabel)} have consumed ${totalCoffeeCount} coffees`,
       },
     });
 
@@ -423,21 +271,69 @@ async function getOrCreateTeam(teamId, teamDomain) {
 
   try {
     const dt = DateTime.local().setZone("Australia/Melbourne");
-    const getOrCreateTeamQuery = client.query(queries.INSERT_OR_GET_TEAM_V1_QUERY, [to.toISO(), teamId, teamDomain]);
-    return getOrCreateTeamQuery.rows[0].id
+    const getOrCreateTeamQuery = await client.query(
+      queries.INSERT_OR_GET_TEAM_V2_QUERY,
+      [dt.toISO(), teamId, teamDomain]
+    );
+    return { dbTeamId: getOrCreateTeamQuery.rows[0].id, dbTeamLabel: getOrCreateTeamQuery.rows[0].label };
+  } catch (e) {
+    console.log(`Error in getOrCreateTeam: ${e}`);
   } finally {
-    client.release();
+    await client.release();
   }
 }
 
-
-
-
 async function getOrCreateUser(userId, userName, dbTeamId) {
+  /**
+   * Create a `user` and `abstract_user` record if they don't
+   * already exist for the user and return the IDs
+   */
+  const client = await pool.connect();
 
+  try {
+    // If there is an existing user set up, just return the details
+    getUserQuery = await client.query(queries.GET_USER_V2_QUERY, [userId, dbTeamId]);
+    if (getUserQuery.rows.length > 0) {
+      return {
+        dbAbstractUserId: getUserQuery.rows[0].abstract_user_id,
+        dbUserId: getUserQuery.rows[0].id,
+        dbUserIsAdmin: getUserQuery.rows[0].is_admin,
+      };
+    }
+
+    // User doesn't exist - we need to create them
+    try {
+      await client.query(queries.BEGIN);
+      const dt = DateTime.local().setZone("Australia/Melbourne");
+
+      // Create a new abstract user to link to
+      const insertAbstractUserQuery = await client.query(queries.INSERT_ABSTRACT_USER_V2_QUERY, [dt.toISO()]);
+      const dbAbstractUserId = insertAbstractUserQuery.rows[0].id
+
+      // Create the main user record - this is created with an insert with on conflict
+      // in case something else slipped in an insert on us
+      const getOrCreateUserQuery = await client.query(
+        queries.INSERT_OR_GET_USER_V2_QUERY,
+        [dt.toISO(), userId, userName, dbAbstractUserId, dbTeamId]
+      );
+
+      await client.query(queries.COMMIT);
+
+      return {
+        dbAbstractUserId: getOrCreateUserQuery.rows[0].abstract_user_id,
+        dbUserId: getOrCreateUserQuery.rows[0].id,
+        dbUserIsAdmin: getOrCreateUserQuery.rows[0].is_admin,
+      };
+    } catch (e) {
+      console.log(`Error in getOrCreateUser: ${e}`)
+      await client.query(queries.ROLLBACK);
+    }
+  } finally {
+    await client.release();
+  }
 }
 
-async function addCoffee(userId, userName, teamId, teamDomain, inc) {
+async function addCoffee(dbAbstractUserId, dbUserId, dbTeamId, dbTeamLabel, inc) {
   if (inc > MAX_COFFEE_ADD) {
     return {
       response_type: "ephemeral",
@@ -465,24 +361,26 @@ async function addCoffee(userId, userName, teamId, teamDomain, inc) {
 
     if (inc > 0) {
       for (let idx = 0; idx < inc; idx++) {
-        await client.query(queries.ADD_DRINK_QUERY, [userId, userName, dt.toISO()]);
+        await client.query(
+          queries.ADD_DRINK_V2_QUERY,
+          [dbAbstractUserId, dbUserId, dt.toISO()]
+        );
       }
     } else if (inc < 0) {
-      await client.query(queries.DELETE_N_MOST_RECENT_DRINKS_FOR_USER_QUERY, [
-        userId,
-        start_of_today.toISO(),
-        start_of_tomorrow.toISO(),
-        -1 * inc,
-      ]);
+      await client.query(
+        queries.DELETE_N_MOST_RECENT_DRINKS_FOR_USER_V2_QUERY,
+        [dbAbstractUserId, start_of_today.toISO(), start_of_tomorrow.toISO(), -1 * inc,]
+      );
     }
 
-    const totalCoffeeCountQuery = await client.query(queries.COUNT_ALL_DRINKS_QUERY, [
+    const totalCoffeeCountQuery = await client.query(queries.COUNT_ALL_DRINKS_V2_QUERY, [
       start_of_today.toISO(),
       start_of_tomorrow.toISO(),
+      dbTeamId,
     ]);
     const totalCoffeeCount = totalCoffeeCountQuery.rows[0].count;
-    const userCoffeeCountQuery = await client.query(queries.COUNT_USER_DRINKS_QUERY, [
-      userId,
+    const userCoffeeCountQuery = await client.query(queries.COUNT_USER_DRINKS_V2_QUERY, [
+      dbAbstractUserId,
       start_of_today.toISO(),
       start_of_tomorrow.toISO(),
     ]);
@@ -490,10 +388,145 @@ async function addCoffee(userId, userName, teamId, teamDomain, inc) {
 
     return {
       response_type: "ephemeral",
-      text: `That's coffee number ${userCoffeeCount} for you today, and number ${totalCoffeeCount} for CC today`,
+      text: `That's coffee number ${userCoffeeCount} for you today, and number ${totalCoffeeCount} for ${getTeamLabelOrGenericPlural(dbTeamLabel)} today`,
     };
   } finally {
     await client.release();
+  }
+}
+
+async function getLinkCode(dbAbstractUserId) {
+  const words = wordlist.getWords(4);
+  const dt = DateTime.local().setZone("Australia/Melbourne");
+  const client = await pool.connect();
+
+  try {
+    await client.query(queries.INSERT_LINK_WORDS_V2_QUERY, [dbAbstractUserId, words, dt.toISO()]);
+    return {
+      response_type: "ephemeral",
+      text: `Your link code is ${words}. To link another workspace enter */coffee link ${words}*`,
+    };
+  } catch (e) {
+    console.log(`Error in getLinkCode: ${e}`);
+  } finally {
+    await client.release();
+  }
+}
+
+async function linkUserByCode(dbAbstractUserId, words) {
+  const dt = DateTime.local().setZone("Australia/Melbourne");
+  const dtLinkCutoff = dt.minus({ days: 1 });
+  const client = await pool.connect();
+
+  try {
+    // This could probably all be done in a single query
+    // and there is also possibly a race condition here, although
+    // hopefully mitigated by a transaction error if two
+    // clients simultaneously try to delete the same link
+    // word record
+    client.query(queries.BEGIN);
+    const getAbstractUserForLinkWordQuery = await client.query(
+      queries.GET_ABSTRACT_USER_FOR_LINK_WORD_V2_QUERY,
+      [words, dtLinkCutoff.toISO()]
+    );
+
+    // Delete the link word if it exists; it has either been consumed,
+    // is too old, or never existing at this point
+    await client.query(
+      queries.DELETE_LINK_WORD_V2_QUERY,
+      [words,]
+    );
+
+    if (getAbstractUserForLinkWordQuery.rows.length < 1) {
+      return {
+        response_type: "ephemeral",
+        text: `The link code ${words} could not be found or is too old. Use */coffee link* to get a new link code`,
+      };
+    }
+
+    const newDbAbstractUserId = getAbstractUserForLinkWordQuery.rows[0].abstract_user_id;
+    await client.query(
+      queries.UPDATE_ABSTRACT_USER_FOR_DRINKS_V2_QUERY,
+      [dbAbstractUserId, newDbAbstractUserId]
+    );
+
+    await client.query(
+      queries.UPDATE_ABSTRACT_USER_FOR_USER_V2_QUERY,
+      [dbAbstractUserId, newDbAbstractUserId]
+    );
+
+    await client.query(queries.COMMIT);
+    return {
+      response_type: "ephemeral",
+      text: `Your slack user has been linked successfully`,
+    };
+  } catch (e) {
+    console.log(`Error in linkUserByCode: ${e}`);
+    client.query(queries.ROLLBACK);
+  } finally {
+    await client.release();
+  }
+}
+
+
+async function makeAdmin(dbUserId, identifierKey, dbUserId, dbUserIsAdmin, userId, userName) {
+  /**
+   * Given the correct 'admin key' (which is static, which is bad)
+   * sets the calling user to be an `admin`
+   */
+  if (ADMIN_KEY === null || ADMIN_KEY === "") {
+    console.log(`Attempt to identify as admin without ADMIN_KEY set: ${dbUserId}:${userId}:${userName}`)
+    // We return the generic error message for failed attempts to identify
+    return GENERIC_FAILURE_RESPONSE;
+  }
+
+  if (identifierKey !== ADMIN_KEY) {
+    console.log(`Failed attempt to identify as admin: ${dbUserId}:${userId}:${userName}`)
+    // We return the generic error message for failed attempts to identify
+    return GENERIC_FAILURE_RESPONSE;
+  }
+
+  const client = await pool.connect();
+
+  try {
+    const makeAdminIfNotAlreadyQuery = await client.query(queries.MAKE_ADMIN_IF_NOT_ALREADY_V2_QUERY, [dbUserId,]);
+    if (makeAdminIfNotAlreadyQuery.rowCount == 0) {
+      console.log(`Failed to identify as admin; may already be admin? ${dbUserId}:${userId}:${userName} isAdmin ${dbUserIsAdmin}`)
+      return GENERIC_FAILURE_RESPONSE;
+    } else {
+      console.log(`Identified as admin: ${dbUserId}:${userId}:${userName}`)
+      return { ...GENERIC_FAILURE_RESPONSE, text: `${GENERIC_FAILURE_RESPONSE.text} ;)` };
+    }
+  } catch (e) {
+    console.log(`makeAdmin failed for user ${dbUserId}:${userId}:${userName}: ${e}`);
+  } finally {
+    await client.release()
+  }
+}
+
+async function setTeamLabel(dbTeamId, teamLabel, dbUserId, dbUserIsAdmin, userId, userName) {
+  /**
+   * Updates the label of the team to be used when outputting messages. (e.g. Common Coders)
+   * 
+   * MUST ONLY BE CALLED BY AN ADMIN. THIS FUNCTION DOES ONLY A TRIVIAL SECURITY CHECK.
+   */
+  if (!dbUserIsAdmin) {
+    console.log(`setTeamLabel was called with dbUserIsAdmin false (User: ${dbUserId}). Please check your values!`);
+    return GENERIC_FAILURE_RESPONSE;
+  }
+  const client = await pool.connect();
+
+  try {
+    console.log(`User setting team label. User: ${dbUserId}:${userId}:${userName} TeamId: ${dbTeamId} Label ${teamLabel}`);
+    await client.query(queries.SET_TEAM_LABEL_V2, [dbTeamId, teamLabel]);
+    return {
+      response_type: "in_channel",
+      text: `The workspace team name has been set to ${teamLabel} by ${userName}`,
+    };
+  } catch (e) {
+    console.log(`setTeamLabel failed for user ${dbUserId}:${userId}:${userName}: ${e}`);
+  } finally {
+    await client.release()
   }
 }
 
@@ -516,6 +549,8 @@ router.post("/addCoffee", async (ctx, next) => {
     return;
   }
 
+  passthroughRequest(ctx);
+
   if (ctx.request.body.command !== "/coffee") {
     ctx.body = {
       response_type: "ephemeral",
@@ -525,7 +560,8 @@ router.post("/addCoffee", async (ctx, next) => {
   }
 
   if (ctx.request.body.text === "migrate") {
-    ctx.body = await runMigrations(
+    ctx.body = await migration.runMigrations(
+      pool,
       ctx.request.body.user_id,
       ctx.request.body.user_name,
       ctx.request.body.team_id,
@@ -534,7 +570,7 @@ router.post("/addCoffee", async (ctx, next) => {
     return;
   }
 
-  if (await areMigrationsPending()) {
+  if (await migration.areMigrationsPending(pool)) {
     ctx.body = {
       response_type: "ephemeral",
       text: "Migrations must be run before continuing",
@@ -542,6 +578,15 @@ router.post("/addCoffee", async (ctx, next) => {
     return;
   }
 
+  const { dbTeamId, dbTeamLabel } = await getOrCreateTeam(
+    ctx.request.body.team_id,
+    ctx.request.body.team_domain
+  );
+  const { dbAbstractUserId, dbUserId, dbUserIsAdmin } = await getOrCreateUser(
+    ctx.request.body.user_id,
+    ctx.request.body.user_name,
+    dbTeamId
+  );
 
   if (ctx.request.body.text === "help") {
     ctx.body = showHelp();
@@ -549,41 +594,67 @@ router.post("/addCoffee", async (ctx, next) => {
   } else if (ctx.request.body.text === "about") {
     ctx.body = showAbout();
     return;
+  } else if (ctx.request.body.text === "link") {
+    ctx.body = await getLinkCode(dbAbstractUserId);
+    return;
+  } else if (ctx.request.body.text.startsWith("link ")) {
+    const linkWords = ctx.request.body.text.substring("link ".length);
+    ctx.body = await linkUserByCode(dbAbstractUserId, linkWords);
+    return;
   } else if (ctx.request.body.text === "count") {
-    ctx.body = await showCoffeeCount(COUNT_DISPLAY_SIZE);
+    ctx.body = await showCoffeeCount(dbTeamId, dbTeamLabel, COUNT_DISPLAY_SIZE);
     return;
   } else if (ctx.request.body.text === "count-all") {
-    ctx.body = await showCoffeeCount(null);
+    ctx.body = await showCoffeeCount(dbTeamId, dbTeamLabel, null);
     return;
   } else if (ctx.request.body.text === "stats") {
-    ctx.body = await showCoffeeStats(null);
+    ctx.body = await showCoffeeStats(dbTeamId, dbTeamLabel);
     return;
   } else if (ctx.request.body.text === "stomach-pump") {
-    ctx.body = await addCoffee(ctx.request.body.user_id, ctx.request.body.user_name, -1);
+    ctx.body = await addCoffee(dbAbstractUserId, dbUserId, dbTeamId, dbTeamLabel, -1);
     return;
   } else if (!isNaN(parseInt(ctx.request.body.text, 10))) {
     ctx.body = await addCoffee(
-      ctx.request.body.user_id,
-      ctx.request.body.user_name,
-      ctx.request.body.team_id,
-      ctx.request.body.team_domain,
+      dbAbstractUserId,
+      dbUserId,
+      dbTeamId,
+      dbTeamLabel,
       parseInt(ctx.request.body.text, 10)
     );
     return;
   } else if (ctx.request.body.text === "") {
-    ctx.body = await addCoffee(ctx.request.body.user_id, ctx.request.body.user_name, 1);
+    ctx.body = await addCoffee(dbAbstractUserId, dbUserId, dbTeamId, dbTeamLabel, 1);
     return;
-  } else if (ctx.request.body.text === "backup") {
-    ctx.body = await createBackup();
+  } else if (ctx.request.body.text.startsWith("auth ")) {
+    const identifierKey = ctx.request.body.text.substring("auth ".length);
+    ctx.body = await makeAdmin(
+      dbUserId,
+      identifierKey,
+      dbUserId,
+      dbUserIsAdmin,
+      ctx.request.body.user_id,
+      ctx.request.body.user_name
+    );
     return;
-  } else if (ctx.request.body.text === "backup-all") {
-    ctx.body = await createFullBackup();
+  } else if (dbUserIsAdmin && ctx.request.body.text.startsWith("teamlabel ")) {
+    const teamLabel = ctx.request.body.text.substring("teamlabel ".length);
+    ctx.body = await setTeamLabel(
+      dbTeamId,
+      teamLabel,
+      dbUserId,
+      dbUserIsAdmin,
+      ctx.request.body.user_id,
+      ctx.request.body.user_name
+    );
+    return;
+  } else if (dbUserIsAdmin && ctx.request.body.text === "backup") {
+    ctx.body = await backup.createBackup(pool, awsDetails);
+    return;
+  } else if (dbUserIsAdmin && ctx.request.body.text === "backup-all") {
+    ctx.body = await backup.createFullBackup(pool, awsDetails);
     return;
   } else {
-    ctx.body = {
-      response_type: "ephemeral",
-      text: "I'm afraid I don't understand your command. Take another sip and try again.",
-    };
+    ctx.body = GENERIC_FAILURE_RESPONSE;
     return;
   }
 });
