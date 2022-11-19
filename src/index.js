@@ -1,4 +1,5 @@
 require("dotenv").config();
+require("./queries");
 const AUTH_KEY = process.env.AUTH_KEY;
 const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID;
 const AWS_SECRET_KEY = process.env.AWS_SECRET_KEY;
@@ -10,12 +11,15 @@ const MAX_COFFEE_ADD = 5;
 const MAX_COFFEE_SUBTRACT = 2;
 const COUNT_DISPLAY_SIZE = 5;
 
+TARGET_MIGRATION_LEVEL = 1;
+
 const Koa = require("koa");
 const Router = require("koa-router");
 const bodyParser = require("koa-bodyparser");
 const { DateTime } = require("luxon");
 const { Pool } = require("pg");
 const AWS = require("aws-sdk");
+const queries = require("./queries");
 const CronJob = require("cron").CronJob;
 
 const app = new Koa();
@@ -33,7 +37,7 @@ const pool = new Pool({
 
 new CronJob(
   "00 00 02 * * *",
-  async function() {
+  async function () {
     await createBackup();
   },
   null,
@@ -70,71 +74,115 @@ an experiment in using firebase. Somehow, it has continued to be used since then
   }
 }
 
+async function runMigrations(userId, userName, teamId, teamDomain) {
+  /***
+   * Run migrations on the database if required. This can be run by any user (which is a bit
+   * dubious, but the command also isn't listed anywhere and should be idempotent so 🤷 gotta
+   * start somewhere)
+   * 
+   * @param {string} userId - the slack user_id issuing the migrate command
+   * @param {string} userName - the slack user name issuing the migrate command
+   * @param {string} teamId - the workspace team_id from which the migrate command is being issued
+   * @param {string} teamDomain - the workspace team_domain from which the migrate command is being issued
+   */
 
-// CREATE_DATABASE_QUERY = "CREATE DATABASE drinks ENCODING = 'UTF8'";
-// CHECK_IF_DATABASE_EXISTS_QUERY = "SELECT datname FROM pg_catalog.pg_database WHERE datname = drinks;"
-CREATE_BACKUP_TABLE_QUERY = `
-CREATE TABLE IF NOT EXISTS public.backups
-(
-    id bigserial NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    backup_until timestamp with time zone NOT NULL,
-    successful BOOLEAN NOT NULL,
-    message TEXT,
-    PRIMARY KEY (id)
-);
-`;
-GET_LAST_SUCCESSFUL_BACKUP_DATETIME_QUERY =
-  "SELECT backup_until FROM public.backups WHERE successful = TRUE ORDER BY backup_until DESC LIMIT 1";
-CREATE_BACKUP_ROW_QUERY =
-  "INSERT INTO public.backups (created_at, backup_until, successful, message) VALUES ($1, $2, $3, $4)";
+  const client = await pool.connect();
 
-CREATE_DRINK_TABLE_QUERY = `
-CREATE TABLE IF NOT EXISTS public.coffee
-(
-    id bigserial NOT NULL,
-    user_id character varying(50) NOT NULL,
-    user_name character varying(200),
-    created_at timestamp with time zone NOT NULL,
-    PRIMARY KEY (id)
-);
-`;
+  try {
+    await client.query(queries.BEGIN);
+    const dt = DateTime.local().setZone("Australia/Melbourne");
+    const getCurrentMigrationLevelQuery = await client.query(queries.GET_MIGRATION_LEVEL);
 
-GET_DRINK_QUERY =
-  "SELECT user_id, user_name, created_at FROM coffee WHERE user_id = $1 AND user_name = $2 AND created_at = $3";
-ADD_DRINK_QUERY = "INSERT INTO coffee (user_id, user_name, created_at) VALUES($1, $2, $3)";
-COUNT_ALL_DRINKS_QUERY = "SELECT COUNT(*) FROM coffee WHERE created_at > $1 AND created_at < $2";
-COUNT_USER_DRINKS_QUERY = "SELECT COUNT(*) FROM coffee WHERE user_id = $1 AND created_at > $2 AND created_at < $3";
-COUNT_ALL_DRINKS_EVER_QUERY = "SELECT COUNT(*) FROM coffee"
-AVERAGE_USER_DRINKS_EVER_QUERY = `
-SELECT user_name, COUNT(coffees_on_day) AS reporting_days, SUM(coffees_on_day) AS total_coffees, AVG(coffees_on_day) AS avg_coffees_per_day, STDDEV(coffees_on_day) AS stddev_coffees_per_day
-FROM (
-  SELECT user_name, COUNT(*) AS coffees_on_day
-  FROM coffee
-  GROUP BY user_name, date(created_at AT TIME ZONE 'Australia/Melbourne')
-) AS coffees_per_day
-GROUP BY user_name
-ORDER BY avg_coffees_per_day DESC`;
-TALLY_ALL_DRINKS_QUERY =
-  "SELECT user_name, COUNT(*) AS drink_count FROM coffee WHERE created_at > $1 AND created_at < $2 GROUP BY user_name ORDER BY drink_count DESC";
-DELETE_N_MOST_RECENT_DRINKS_FOR_USER_QUERY =
-  "DELETE FROM coffee WHERE id IN (SELECT id FROM coffee WHERE user_id = $1 AND created_at > $2 AND created_at < $3 ORDER BY id DESC LIMIT $4)";
-ALL_DRINKS_SINCE_DATETIME_QUERY = "SELECT id, user_id, user_name, created_at FROM coffee WHERE created_at > $1";
-ALL_DRINKS_QUERY = "SELECT id, user_id, user_name, created_at FROM coffee";
+    // If there are no migration rows, the max value is null
+    let currentMigrationLevel = getCurrentMigrationLevelQuery.rows[0].migration_level;
+    console.log(`Current migration level: ${currentMigrationLevel}`);
+
+    if (currentMigrationLevel === null) {
+      console.log(`Applying migration level 1`);
+      await client.query(queries.CREATE_ABSTRACT_USER_TABLE_V1_QUERY);
+      await client.query(queries.CREATE_TEAM_TABLE_V1_QUERY);
+      await client.query(queries.CREATE_TEAM_USER_TABLE_V1_QUERY);
+      await client.query(queries.CREATE_ABSTRACT_USER_DRINK_TABLE_V1_QUERY);
+
+      // Now to migrate the data.
+      // There is an assumption here that all the current data comes from
+      // the workspace from which the migration is being run.
+      // If that isn't the case... well, just make sure it is the case OK?
+      // This could no doubt be implemented directly in SQL, but that's a
+      // future thing to think about
+
+      // Create the team record
+      insertTeamQuery = await client.query(queries.INSERT_OR_GET_TEAM_V1_QUERY, [dt.toISO(), teamId, teamDomain]);
+      dbTeamId = insertTeamQuery.rows[0].id
+
+      // Get a list of distinct users from the drinks table
+      getDistinctUsersQuery = await client.query(queries.MIGRATION_V1_GET_DISTINCT_USERS_QUERY);
+
+      for (row of getDistinctUsersQuery.rows) {
+        // Create an abstract user and get back the identifier
+        const insertAbstractUserQuery = await client.query(queries.INSERT_ABSTRACT_USER_V1_QUERY, [dt.toISO()]);
+        const dbAbstractUserId = insertAbstractUserQuery.rows[0].id
+
+        // Create a user record for each distinct user from the drinks table
+        // on the current team_id pointing to the abstract user and team record
+        await client.query(queries.INSERT_USER_V1_QUERY, [dt.toISO(), row.user_id, row.user_name, dbTeamId, dbAbstractUserId])
+      }
+
+      // Once that has been done for all users, run a single SQL command
+      // to migrate all the drinks that have been recorded
+      await client.query(queries.MIGRATION_V1_COPY_DRINKS)
+      // Step 3 ... Profit?
+      await client.query(queries.MIGRATION_V1_SET_MIGRATION_LEVEL, [1, dt.toISO()]);
+      await client.query(queries.COMMIT);
+      console.log(`Migration level 1 applied successfully`);
+    }
+    // Add additional migrations here
+    console.log(`All necessary migrations applied successfully`);
+    return {
+      response_type: "ephemeral",
+      text: `Migrations ran successfully`,
+    };
+  } catch (e) {
+    await client.query(queries.ROLLBACK);
+    console.log(`Migrations failed to apply: ${e}`);
+    return {
+      response_type: "ephemeral",
+      text: `Migrations failed to apply`,
+    };
+  } finally {
+    await client.release();
+  }
+}
+
+async function areMigrationsPending() {
+  /**
+   * Check if any migrations are pending, and return an error if so
+   */
+  const client = await pool.connect();
+  try {
+    const getCurrentMigrationLevelQuery = await client.query(queries.GET_MIGRATION_LEVEL);
+
+    // If there are no migration rows, the max value is null
+    const currentMigrationLevel = getCurrentMigrationLevelQuery.rows[0].migration_level;
+    return currentMigrationLevel === null || currentMigrationLevel < TARGET_MIGRATION_LEVEL;
+  } finally {
+    await client.release();
+  }
+}
 
 async function createBackup() {
   const client = await pool.connect();
 
   try {
     const dt = DateTime.local().setZone("Australia/Melbourne");
-    const getLastSuccessfulBackupQuery = await client.query(GET_LAST_SUCCESSFUL_BACKUP_DATETIME_QUERY);
+    const getLastSuccessfulBackupQuery = await client.query(queries.GET_LAST_SUCCESSFUL_BACKUP_DATETIME_QUERY);
 
     let backupFromDate = DateTime.fromSeconds(0);
     if (getLastSuccessfulBackupQuery.rows.length > 0) {
       backupFromDate = DateTime.fromJSDate(getLastSuccessfulBackupQuery.rows[0].backup_until);
     }
 
-    const getAllDrinksSinceDatetimeQuery = await client.query(ALL_DRINKS_SINCE_DATETIME_QUERY, [
+    const getAllDrinksSinceDatetimeQuery = await client.query(queries.ALL_DRINKS_SINCE_DATETIME_QUERY, [
       backupFromDate.toISO(),
     ]);
     allDrinksSinceDatetime = getAllDrinksSinceDatetimeQuery.rows;
@@ -179,13 +227,13 @@ async function createBackup() {
 
     try {
       await s3.upload(params).promise();
-      await client.query(CREATE_BACKUP_ROW_QUERY, [dt.toISO(), maxDate.toISO(), true, ""]);
+      await client.query(queries.CREATE_BACKUP_ROW_QUERY, [dt.toISO(), maxDate.toISO(), true, ""]);
       return {
         response_type: "ephemeral",
         text: `${allDrinksSinceDatetime.length} entries backed up. Filename: ${params.Key}.`,
       };
     } catch (err) {
-      await client.query(CREATE_BACKUP_ROW_QUERY, [dt.toISO(), maxDate.toISO(), false, err]);
+      await client.query(queries.CREATE_BACKUP_ROW_QUERY, [dt.toISO(), maxDate.toISO(), false, err]);
       return { response_type: "ephemeral", text: `Backup error: ${err}` };
     }
   } finally {
@@ -198,7 +246,7 @@ async function createFullBackup() {
 
   try {
     const dt = DateTime.local().setZone("Australia/Melbourne");
-    const getAllDrinksQuery = await client.query(ALL_DRINKS_QUERY);
+    const getAllDrinksQuery = await client.query(queries.ALL_DRINKS_QUERY);
     allDrinks = getAllDrinksQuery.rows;
 
     if (allDrinks.length === 0) {
@@ -247,9 +295,11 @@ async function createDatabaseBitsIfMissing() {
   const client = await pool.connect();
   try {
     console.log("Attempting to create drink table");
-    await client.query(CREATE_DRINK_TABLE_QUERY);
+    await client.query(queries.CREATE_DRINK_TABLE_QUERY);
     console.log("Attempting to create backup table");
-    await client.query(CREATE_BACKUP_TABLE_QUERY);
+    await client.query(queries.CREATE_BACKUP_TABLE_QUERY);
+    console.log("Attempting to create migrations table");
+    await client.query(queries.CREATE_MIGRATION_TABLE_QUERY);
     console.log("All table creation complete");
   } finally {
     await client.release();
@@ -260,10 +310,10 @@ async function showCoffeeStats() {
   const client = await pool.connect();
   try {
 
-    const totalCoffeeCountQuery = await client.query(COUNT_ALL_DRINKS_EVER_QUERY);
+    const totalCoffeeCountQuery = await client.query(queries.COUNT_ALL_DRINKS_EVER_QUERY);
     const totalCoffeeCount = totalCoffeeCountQuery.rows[0].count;
 
-    const coffeeCountByUserQuery = await client.query(AVERAGE_USER_DRINKS_EVER_QUERY);
+    const coffeeCountByUserQuery = await client.query(queries.AVERAGE_USER_DRINKS_EVER_QUERY);
 
     let blocks = [];
     let textChunks = [];
@@ -313,13 +363,13 @@ async function showCoffeeCount(numOfItems) {
     });
     const start_of_tomorrow = dt.plus({ days: 1 }).set({ hour: 0, minute: 0, second: 0, millisecond: 0 });
 
-    const totalCoffeeCountQuery = await client.query(COUNT_ALL_DRINKS_QUERY, [
+    const totalCoffeeCountQuery = await client.query(queries.COUNT_ALL_DRINKS_QUERY, [
       start_of_today.toISO(),
       start_of_tomorrow.toISO(),
     ]);
     const totalCoffeeCount = totalCoffeeCountQuery.rows[0].count;
 
-    const coffeeCountByUserQuery = await client.query(TALLY_ALL_DRINKS_QUERY, [
+    const coffeeCountByUserQuery = await client.query(queries.TALLY_ALL_DRINKS_QUERY, [
       start_of_today.toISO(),
       start_of_tomorrow.toISO(),
     ]);
@@ -364,7 +414,30 @@ async function showCoffeeCount(numOfItems) {
   }
 }
 
-async function addCoffee(userId, userName, inc) {
+async function getOrCreateTeam(teamId, teamDomain) {
+  /**
+   * Create a 'team' record if one doesn't already exist for the team
+   * and return the database ID for the team (not the slack team_id)
+   */
+  const client = await pool.connect();
+
+  try {
+    const dt = DateTime.local().setZone("Australia/Melbourne");
+    const getOrCreateTeamQuery = client.query(queries.INSERT_OR_GET_TEAM_V1_QUERY, [to.toISO(), teamId, teamDomain]);
+    return getOrCreateTeamQuery.rows[0].id
+  } finally {
+    client.release();
+  }
+}
+
+
+
+
+async function getOrCreateUser(userId, userName, dbTeamId) {
+
+}
+
+async function addCoffee(userId, userName, teamId, teamDomain, inc) {
   if (inc > MAX_COFFEE_ADD) {
     return {
       response_type: "ephemeral",
@@ -392,10 +465,10 @@ async function addCoffee(userId, userName, inc) {
 
     if (inc > 0) {
       for (let idx = 0; idx < inc; idx++) {
-        await client.query(ADD_DRINK_QUERY, [userId, userName, dt.toISO()]);
+        await client.query(queries.ADD_DRINK_QUERY, [userId, userName, dt.toISO()]);
       }
     } else if (inc < 0) {
-      await client.query(DELETE_N_MOST_RECENT_DRINKS_FOR_USER_QUERY, [
+      await client.query(queries.DELETE_N_MOST_RECENT_DRINKS_FOR_USER_QUERY, [
         userId,
         start_of_today.toISO(),
         start_of_tomorrow.toISO(),
@@ -403,12 +476,12 @@ async function addCoffee(userId, userName, inc) {
       ]);
     }
 
-    const totalCoffeeCountQuery = await client.query(COUNT_ALL_DRINKS_QUERY, [
+    const totalCoffeeCountQuery = await client.query(queries.COUNT_ALL_DRINKS_QUERY, [
       start_of_today.toISO(),
       start_of_tomorrow.toISO(),
     ]);
     const totalCoffeeCount = totalCoffeeCountQuery.rows[0].count;
-    const userCoffeeCountQuery = await client.query(COUNT_USER_DRINKS_QUERY, [
+    const userCoffeeCountQuery = await client.query(queries.COUNT_USER_DRINKS_QUERY, [
       userId,
       start_of_today.toISO(),
       start_of_tomorrow.toISO(),
@@ -424,55 +497,21 @@ async function addCoffee(userId, userName, inc) {
   }
 }
 
-PERMISSION_IMPORT = "IMPORT";
 PERMISSION_SLACKACTION = "SLACK_ACTION";
 
 async function hasPermission(ctx, action) {
+  /**
+   * Check that the current user has the specified permission,
+   * except that right now the 'permission' is ignored and it
+   * is just a dumb key check
+   */
   return ctx.request.query.key === AUTH_KEY;
 }
 
-router.post("/importFromFirebaseData", async (ctx, next) => {
-  if (!hasPermission(ctx, PERMISSION_IMPORT)) {
-    ctx.body = { result: "nope" };
-    return;
-  }
-
-  if (ctx.request.body) {
-    let added = 0;
-    let existing = 0;
-    const client = await pool.connect();
-    try {
-      await Promise.all(
-        ctx.request.body.map(async (dayData) => {
-          if (!dayData.timestamp) {
-            return;
-          }
-          await Promise.all(
-            dayData.coffeeTimes.map(async (row) => {
-              const checkIfExistsQuery = await client.query(GET_DRINK_QUERY, [
-                row.user_id,
-                row.user_name,
-                row.timestamp,
-              ]);
-              if (checkIfExistsQuery.rows.length === 0) {
-                added++;
-                await client.query(ADD_DRINK_QUERY, [row.user_id, row.user_name, row.timestamp]);
-              } else {
-                existing++;
-              }
-            })
-          );
-        })
-      );
-      ctx.body = { added: added, existing: existing };
-    } finally {
-      await client.release();
-    }
-  }
-});
-
 router.post("/addCoffee", async (ctx, next) => {
-  if (!hasPermission(ctx, PERMISSION_IMPORT)) {
+  // The permissions are a lie - whatever action you
+  // pass it does the same thing
+  if (!hasPermission(ctx, PERMISSION_SLACKACTION)) {
     ctx.body = { result: "nope" };
     return;
   }
@@ -484,6 +523,25 @@ router.post("/addCoffee", async (ctx, next) => {
     };
     return;
   }
+
+  if (ctx.request.body.text === "migrate") {
+    ctx.body = await runMigrations(
+      ctx.request.body.user_id,
+      ctx.request.body.user_name,
+      ctx.request.body.team_id,
+      ctx.request.body.team_domain,
+    )
+    return;
+  }
+
+  if (await areMigrationsPending()) {
+    ctx.body = {
+      response_type: "ephemeral",
+      text: "Migrations must be run before continuing",
+    };
+    return;
+  }
+
 
   if (ctx.request.body.text === "help") {
     ctx.body = showHelp();
@@ -507,6 +565,8 @@ router.post("/addCoffee", async (ctx, next) => {
     ctx.body = await addCoffee(
       ctx.request.body.user_id,
       ctx.request.body.user_name,
+      ctx.request.body.team_id,
+      ctx.request.body.team_domain,
       parseInt(ctx.request.body.text, 10)
     );
     return;
