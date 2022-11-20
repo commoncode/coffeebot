@@ -114,7 +114,9 @@ function showHelp() {
         - \`/coffee -<number>\` - subtract multiple coffees, max 2; but try not to add coffees you're not drinking
         - \`/coffee count\` - show the total number of coffees, and highest 5 coffee consumers
         - \`/coffee count-all\` - show the total number of coffees, and _all_ coffee consumers
-        - \`/coffee stats\` - see summary data from all coffees recorded since the beginning of the bot
+        - \`/coffee stats\` - see summary data from all coffees recorded since the beginning of the bot (currently broken)
+        - \`/coffee link\` - get a code to link your user between workspaces, so you can log coffees from any of them
+        - \`/coffee link <link code>\` - use a link code to link your account between workspaces
         - \`/coffee about\` - about coffeebot`,
   };
 }
@@ -122,8 +124,8 @@ function showHelp() {
 function showAbout() {
   return {
     response_type: "ephemeral",
-    text: `Coffeebot was written the night before international coffee 2020 as a combination between a joke and
-an experiment in using firebase. Somehow, it has continued to be used since then. I hope you like it.
+    text: `Coffeebot was written the night before international coffee day 2020 as a something between ` + 
+          `a joke and an experiment in using firebase. Somehow, it has continued to be used since then. I hope you like it.
 
    - Simeon`
   }
