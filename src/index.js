@@ -121,11 +121,14 @@ function showHelp() {
   };
 }
 
-function showAbout() {
+function showAbout(dbTeamLabel) {
   return {
     response_type: "ephemeral",
-    text: `Coffeebot was written the night before international coffee day 2020 as a something between ` + 
-          `a joke and an experiment in using firebase. Somehow, it has continued to be used since then. I hope you like it.
+    text: `CoffeeBot is a helpful slack bot dedicated to capturing the coffee consumption habits of ${getTeamLabelOrGenericPlural(dbTeamLabel)}.\n` +
+          `It was written the night before international coffee day 2020 as a something between ` +
+          `a joke and an experiment in using firebase. Somehow, it has continued to be used since then (although no longer in Firebase).\n` + 
+          `It was created based on the idea by Bec (of 2020 Common Code) that it would be cool to know how much coffee ` +
+          `team members drink. I hope you enjoy it.
 
    - Simeon`
   }
@@ -535,7 +538,7 @@ async function setTeamLabel(dbTeamId, teamLabel, dbUserId, dbUserIsAdmin, userId
 async function getMyInfo(dbTeamId, teamId, teamDomain, dbTeamLabel, dbAbstractUserId, dbUserId, dbUserIsAdmin, userId, userName) {
   /**
    * Outputs a summary of the current user context for debugging
-   */  
+   */
   return {
     response_type: "ephemeral",
     text: `You are on team ${dbTeamId}:${teamId}:${teamDomain}:${dbTeamLabel}\nuser ${dbAbstractUserId}:${dbUserId}:${userId}:${userName}. Your is_admin value is ${dbUserIsAdmin}`,
@@ -604,7 +607,7 @@ router.post("/addCoffee", async (ctx, next) => {
     ctx.body = showHelp();
     return;
   } else if (ctx.request.body.text === "about") {
-    ctx.body = showAbout();
+    ctx.body = showAbout(dbTeamLabel);
     return;
   } else if (ctx.request.body.text === "link") {
     ctx.body = await getLinkCode(dbAbstractUserId);
