@@ -125,10 +125,10 @@ function showAbout(dbTeamLabel) {
   return {
     response_type: "ephemeral",
     text: `CoffeeBot is a helpful slack bot dedicated to capturing the coffee consumption habits of ${getTeamLabelOrGenericPlural(dbTeamLabel)}.\n` +
-          `It was written the night before international coffee day 2020 as a something between ` +
-          `a joke and an experiment in using firebase. Somehow, it has continued to be used since then (although no longer in Firebase).\n` + 
-          `It was created based on the idea by Bec (of 2020 Common Code) that it would be cool to know how much coffee ` +
-          `team members drink. I hope you enjoy it.
+      `It was written the night before international coffee day 2020 as a something between ` +
+      `a joke and an experiment in using firebase. Somehow, it has continued to be used since then (although no longer in Firebase).\n` +
+      `It was created based on the idea by Bec (of 2020 Common Code) that it would be cool to know how much coffee ` +
+      `team members drink. I hope you enjoy it.
 
    - Simeon`
   }
@@ -299,9 +299,14 @@ async function getOrCreateUser(userId, userName, dbTeamId) {
     // If there is an existing user set up, just return the details
     getUserQuery = await client.query(queries.GET_USER_V2_QUERY, [userId, dbTeamId]);
     if (getUserQuery.rows.length > 0) {
+      // If the user's slack name has changed, update it in the user table
+      const dbUserId = getUserQuery.rows[0].id;
+      if (getUserQuery.rows[0].user_name !== userName) {
+        await client.query(queries.UPDATE_USER_NAME_V2_QUERY, [dbUserId, userName])
+      }
       return {
         dbAbstractUserId: getUserQuery.rows[0].abstract_user_id,
-        dbUserId: getUserQuery.rows[0].id,
+        dbUserId: dbUserId,
         dbUserIsAdmin: getUserQuery.rows[0].is_admin,
       };
     }

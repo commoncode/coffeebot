@@ -207,7 +207,7 @@ module.exports = {
     `,
 
     GET_USER_V2_QUERY: `
-        SELECT id, abstract_user_id, is_admin
+        SELECT id, abstract_user_id, is_admin, user_name
         FROM public.user_v2
         WHERE user_id = $1 AND team_id = $2;
     `,
@@ -224,6 +224,12 @@ module.exports = {
         SELECT abstract_user_id, id, is_admin
         FROM public.user_v2
         WHERE user_id = $2 AND team_id = $5;
+    `,
+
+    UPDATE_USER_NAME_V2_QUERY: `
+        UPDATE public.user_v2
+        SET user_name = $2
+        WHERE id = $1;
     `,
 
     INSERT_LINK_WORDS_V2_QUERY: `
