@@ -530,6 +530,16 @@ async function setTeamLabel(dbTeamId, teamLabel, dbUserId, dbUserIsAdmin, userId
   }
 }
 
+async function getMyInfo(dbTeamId, teamId, teamDomain, dbTeamLabel, dbAbstractUserId, dbUserId, dbUserIsAdmin, userId, userName) {
+  /**
+   * Outputs a summary of the current user context for debugging
+   */  
+  return {
+    response_type: "ephemeral",
+    text: `You are on team ${dbTeamId}:${teamId}:${teamDomain}:${dbTeamLabel}\nuser ${dbAbstractUserId}:${dbUserId}:${userId}:${userName}. Your is_admin value is ${dbUserIsAdmin}`,
+  };
+}
+
 PERMISSION_SLACKACTION = "SLACK_ACTION";
 
 async function hasPermission(ctx, action) {
@@ -641,6 +651,19 @@ router.post("/addCoffee", async (ctx, next) => {
     ctx.body = await setTeamLabel(
       dbTeamId,
       teamLabel,
+      dbUserId,
+      dbUserIsAdmin,
+      ctx.request.body.user_id,
+      ctx.request.body.user_name
+    );
+    return;
+  } else if (dbUserIsAdmin && ctx.request.body.text == "myinfo") {
+    ctx.body = await getMyInfo(
+      dbTeamId,
+      ctx.request.body.team_id,
+      ctx.request.body.team_domain,
+      dbTeamLabel,
+      dbAbstractUserId,
       dbUserId,
       dbUserIsAdmin,
       ctx.request.body.user_id,
