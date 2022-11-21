@@ -414,7 +414,7 @@ async function getLinkCode(dbAbstractUserId) {
     await client.query(queries.INSERT_LINK_WORDS_V2_QUERY, [dbAbstractUserId, words, dt.toISO()]);
     return {
       response_type: "ephemeral",
-      text: `Your link code is ${words}. To link another workspace enter */coffee link ${words}*`,
+      text: `Your link code is ${words}. To link another workspace enter /coffee link ${words}`,
     };
   } catch (e) {
     console.log(`Error in getLinkCode: ${e}`);
@@ -450,7 +450,7 @@ async function linkUserByCode(dbAbstractUserId, words) {
     if (getAbstractUserForLinkWordQuery.rows.length < 1) {
       return {
         response_type: "ephemeral",
-        text: `The link code ${words} could not be found or is too old. Use */coffee link* to get a new link code`,
+        text: `The link code ${words} could not be found or is too old. Use /coffee link to get a new link code`,
       };
     }
 
