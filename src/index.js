@@ -87,7 +87,7 @@ function passthroughRequest(ctx) {
    * to process incoming data in case the new one screws up
    * or isn't working correctly.
    */
-  if (REQUEST_PASSTHROUGH_HOST === null) {
+  if (REQUEST_PASSTHROUGH_HOST === null || REQUEST_PASSTHROUGH_HOST === "") {
     return;
   }
 
