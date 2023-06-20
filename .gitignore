@@ -67,3 +67,6 @@ node_modules/
 
 # Local docker volume mounts
 .volumes
+
+# Editor folders
+.vscode
