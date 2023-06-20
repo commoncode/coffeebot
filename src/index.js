@@ -118,6 +118,10 @@ function passthroughRequest(ctx) {
 }
 
 function showHelp() {
+  /**
+   * Post simple 'help' screen to Slack, visible only to the user who used the `/coffee help` command
+   * (because response_type is 'ephemeral')
+   */
   return {
     response_type: "ephemeral",
     text: `Ohai, and welcome to coffeebot. Coffeebot counts the coffees consumed by teams because why not.
@@ -139,6 +143,10 @@ function showHelp() {
 }
 
 function showAbout(dbTeamLabel) {
+  /**
+  * Post simple 'about' screen to Slack, visible only to the user who used the `/coffee help` command
+  * (because response_type is 'ephemeral')
+  */
   return {
     response_type: "ephemeral",
     text: `CoffeeBot is a helpful slack bot dedicated to capturing the coffee consumption habits of ${getTeamLabelOrGenericPlural(dbTeamLabel)}.\n` +
@@ -154,6 +162,11 @@ function showAbout(dbTeamLabel) {
 
 
 async function createDatabaseBitsIfMissing() {
+  /**
+   * Create something resembling a 'database migrations' table
+   * to track which groups of queries have executed to do database
+   * structure updates.
+   */
   const client = await pool.connect();
   try {
     console.log("Attempting to create migrations table");
@@ -165,6 +178,13 @@ async function createDatabaseBitsIfMissing() {
 }
 
 async function showCoffeeStats(dbTeamId, dbTeamLabel) {
+  /**
+   * Return slack-renderable statistics on reported coffee consumption
+   * for people in the team for the current workspace.
+   * NOTE: This (as at 2023-06-20) returns an error in slack.
+   * Don't know whether that is because of an internal error,
+   * or the blocks going to slack don't have valid structure/format.
+   */
   const client = await pool.connect();
   try {
 
@@ -216,10 +236,14 @@ async function showCoffeeStats(dbTeamId, dbTeamLabel) {
 }
 
 function getTeamLabelOrGenericPlural(dbTeamLabel) {
+  // Helper to get a generic team label if one is not set
   return dbTeamLabel || 'workspace members';
 }
 
 async function showCoffeeCount(dbTeamId, dbTeamLabel, numOfItems) {
+  /**
+   * Return slack-renderable daily coffee leaderboard
+   */
   const client = await pool.connect();
   try {
     const dt = DateTime.local().setZone("Australia/Melbourne");
@@ -361,6 +385,15 @@ async function getOrCreateUser(userId, userName, dbTeamId) {
 }
 
 async function addCoffee(dbAbstractUserId, dbUserId, dbTeamId, dbTeamLabel, inc) {
+  /**
+   * Add coffees to the count for a specific user (or subtract if negative inc value),
+   * and return the new day total for that user in a slack-renderable form.
+   * For subtraction, the most recent coffee records are deleted (i.e. lost forever).
+   * On reflection, just marking them inactive would probably have been better but
+   * that's not what I've done.
+   */
+
+  // sanity check actions
   if (inc > MAX_COFFEE_ADD) {
     return {
       response_type: "ephemeral",
@@ -386,6 +419,7 @@ async function addCoffee(dbAbstractUserId, dbUserId, dbTeamId, dbTeamLabel, inc)
     });
     const start_of_tomorrow = dt.plus({ days: 1 }).set({ hour: 0, minute: 0, second: 0, millisecond: 0 });
 
+    // add or remove drinks
     if (inc > 0) {
       for (let idx = 0; idx < inc; idx++) {
         await client.query(
@@ -400,6 +434,7 @@ async function addCoffee(dbAbstractUserId, dbUserId, dbTeamId, dbTeamLabel, inc)
       );
     }
 
+    // calculate current drink count for the user and return as slack-renderable items
     const totalCoffeeCountQuery = await client.query(queries.COUNT_ALL_DRINKS_V2_QUERY, [
       start_of_today.toISO(),
       start_of_tomorrow.toISO(),
@@ -423,6 +458,16 @@ async function addCoffee(dbAbstractUserId, dbUserId, dbTeamId, dbTeamLabel, inc)
 }
 
 async function getLinkCode(dbAbstractUserId) {
+  /**
+   * Generate a link code for linking a user between workspaces.
+   * The flow for linking is that the user requests a link code, which gets
+   * written to the database for that user and returned to the user in slack
+   * (visible only to that user, because 'ephemeral')
+   * The user then passes that link code in another workspace connected to
+   * CoffeeBot to link the accounts between the two spaces. Linking the account
+   * means that a single coffee count for the user can be generated across the multiple
+   * workspaces, regardless of where they log the coffee.
+   */
   const words = wordlist.getWords(4);
   const dt = DateTime.local().setZone("Australia/Melbourne");
   const client = await pool.connect();
@@ -441,6 +486,11 @@ async function getLinkCode(dbAbstractUserId) {
 }
 
 async function linkUserByCode(dbAbstractUserId, words) {
+  /**
+   * Receive a link code for a user, and use it to link the user between workspaces.
+   * Note that I have _no idea_ what will happen if a link code is passed back
+   * to the same workspace. Hopefully it doesn't explode things...
+   */
   const dt = DateTime.local().setZone("Australia/Melbourne");
   const dtLinkCutoff = dt.minus({ days: 1 });
   const client = await pool.connect();
