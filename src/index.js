@@ -53,10 +53,27 @@ const pool = new Pool({
   port: process.env.POSTGRES_PORT,
 });
 
+/**
+ * Cron Jobs perform backups of data in a
+ * JSONL format to S3. Note there is no current
+ * mechanism to restore the data - it would need
+ * to be manually loaded into the database
+ * (although that should be fairly straightforward)
+ */
 new CronJob(
   "00 00 02 * * *",
   async function () {
-    await createBackup(pool, awsDetails);
+    await backup.createBackup(pool, awsDetails);
+  },
+  null,
+  true,
+  "Australia/Melbourne"
+);
+
+new CronJob(
+  "00 00 03 * * SAT",
+  async function () {
+    await backup.createFullBackup(pool, awsDetails);
   },
   null,
   true,
